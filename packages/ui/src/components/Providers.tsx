@@ -23,6 +23,40 @@ import type { Provider } from "@/types";
 
 interface ProviderType extends Provider {}
 
+type AvailableTransformer = {
+  name: string;
+  endpoint: string | null;
+};
+
+const BUILT_IN_TRANSFORMERS: AvailableTransformer[] = [
+  { name: "anthropic", endpoint: null },
+  { name: "deepseek", endpoint: null },
+  { name: "gemini", endpoint: null },
+  { name: "openrouter", endpoint: null },
+  { name: "groq", endpoint: null },
+  { name: "maxtoken", endpoint: null },
+  { name: "tooluse", endpoint: null },
+  { name: "gemini-cli", endpoint: null },
+  { name: "reasoning", endpoint: null },
+  { name: "sampling", endpoint: null },
+  { name: "enhancetool", endpoint: null },
+  { name: "cleancache", endpoint: null },
+  { name: "vertex-gemini", endpoint: null },
+  { name: "chutes-glm", endpoint: null },
+  { name: "qwen-cli", endpoint: null },
+  { name: "rovo-cli", endpoint: null },
+];
+
+function mergeTransformers(transformers: AvailableTransformer[]): AvailableTransformer[] {
+  const merged = new Map<string, AvailableTransformer>();
+
+  for (const transformer of [...BUILT_IN_TRANSFORMERS, ...transformers]) {
+    merged.set(transformer.name, transformer);
+  }
+
+  return Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function Providers() {
   const { t } = useTranslation();
   const { config, setConfig } = useConfig();
@@ -31,7 +65,7 @@ export function Providers() {
   const [hasFetchedModels, setHasFetchedModels] = useState<Record<number, boolean>>({});
   const [providerParamInputs, setProviderParamInputs] = useState<Record<string, {name: string, value: string}>>({});
   const [modelParamInputs, setModelParamInputs] = useState<Record<string, {name: string, value: string}>>({});
-  const [availableTransformers, setAvailableTransformers] = useState<{name: string; endpoint: string | null;}[]>([]);
+  const [availableTransformers, setAvailableTransformers] = useState<AvailableTransformer[]>(BUILT_IN_TRANSFORMERS);
   const [editingProviderData, setEditingProviderData] = useState<ProviderType | null>(null);
   const [isNewProvider, setIsNewProvider] = useState<boolean>(false);
   const [providerTemplates, setProviderTemplates] = useState<ProviderType[]>([]);
@@ -63,10 +97,11 @@ export function Providers() {
   useEffect(() => {
     const fetchTransformers = async () => {
       try {
-        const response = await api.get<{transformers: {name: string; endpoint: string | null;}[]}>('/transformers');
-        setAvailableTransformers(response.transformers);
+        const response = await api.get<{transformers: AvailableTransformer[]}>('/transformers');
+        setAvailableTransformers(mergeTransformers(response.transformers || []));
       } catch (error) {
         console.error('Failed to fetch transformers:', error);
+        setAvailableTransformers(mergeTransformers([]));
       }
     };
 
