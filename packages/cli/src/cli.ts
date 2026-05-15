@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { run, restartService } from "./utils";
+import { restartService, startServiceInBackground } from "./utils";
 import { showStatus } from "./utils/status";
 import { executeCodeCommand, PresetConfig } from "./utils/codeCommand";
 import {
@@ -11,10 +11,9 @@ import { runModelSelector } from "./utils/modelSelector";
 import { activateCommand } from "./utils/activateCommand";
 import { readConfigFile } from "./utils";
 import { version } from "../package.json";
-import { spawn, exec } from "child_process";
+import { exec } from "child_process";
 import {getPresetDir, loadConfigFromManifest, PID_FILE, readPresetFile, REFERENCE_COUNT_FILE} from "@CCR/shared";
 import fs, { existsSync, readFileSync } from "fs";
-import { join } from "path";
 import { parseStatusLineData, StatusLineInput } from "./utils/statusline";
 import {handlePresetCommand} from "./utils/preset";
 import { handleInstallCommand } from "./utils/installCommand";
@@ -75,26 +74,6 @@ Examples:
   eval "$(ccr activate)"  # Set environment variables globally
   ccr ui
 `;
-
-async function waitForService(
-  timeout = 10000,
-  initialDelay = 1000
-): Promise<boolean> {
-  // Wait for an initial period to let the service initialize
-  await new Promise((resolve) => setTimeout(resolve, initialDelay));
-
-  const startTime = Date.now();
-  while (Date.now() - startTime < timeout) {
-    const isRunning = isServiceRunning()
-    if (isRunning) {
-      // Wait for an additional short period to ensure service is fully ready
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      return true;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  return false;
-}
 
 async function main() {
   const isRunning = isServiceRunning()
@@ -170,36 +149,16 @@ async function main() {
       };
 
       if (shouldStartServer && !isRunning) {
-        console.log("Service not running, starting service...");
-        const cliPath = join(__dirname, "cli.js");
-        const startProcess = spawn("node", [cliPath, "start"], {
-          detached: true,
-          stdio: "ignore",
-        });
-
-        startProcess.on("error", (error) => {
-          console.error("Failed to start service:", error.message);
-          process.exit(1);
-        });
-
-        startProcess.unref();
-
-        if (await waitForService()) {
-          executeCodeCommand(codeArgs, presetConfig, envOverrides, command);
-        } else {
+        const started = await startServiceInBackground();
+        if (!started) {
           console.error(
             "Service startup timeout, please manually run `ccr start` to start the service"
           );
           process.exit(1);
         }
-      } else {
-        // Service is already running or no need to start server
-        if (shouldStartServer && !isRunning) {
-          console.error("Service is not running. Please start it first with `ccr start`");
-          process.exit(1);
-        }
-        executeCodeCommand(codeArgs, presetConfig, envOverrides, command);
       }
+
+      executeCodeCommand(codeArgs, presetConfig, envOverrides, command);
       return;
     } else {
       // Not a preset nor a known command
@@ -210,7 +169,7 @@ async function main() {
 
   switch (command) {
     case "start":
-      await run();
+      await startServiceInBackground();
       break;
     case "stop":
       try {
@@ -278,117 +237,22 @@ async function main() {
       break;
     case "code":
       if (!isRunning) {
-        console.log("Service not running, starting service...");
-        const cliPath = join(__dirname, "cli.js");
-        const startProcess = spawn("node", [cliPath, "start"], {
-          detached: true,
-          stdio: "ignore",
-        });
-
-        startProcess.on("error", (error) => {
-          console.error("Failed to start service:", error.message);
-          process.exit(1);
-        });
-
-        startProcess.unref();
-
-        if (await waitForService()) {
-          const codeArgs = process.argv.slice(3);
-          executeCodeCommand(codeArgs);
-        } else {
-          console.error(
-            "Service startup timeout, please manually run `ccr start` to start the service"
-          );
+        const started = await startServiceInBackground();
+        if (!started) {
           process.exit(1);
         }
-      } else {
-        const codeArgs = process.argv.slice(3);
-        executeCodeCommand(codeArgs);
       }
+      executeCodeCommand(process.argv.slice(3));
       break;
     case "ui":
       // Check if service is running
       if (!isRunning) {
-        console.log("Service not running, starting service...");
-        const cliPath = join(__dirname, "cli.js");
-        const startProcess = spawn("node", [cliPath, "start"], {
-          detached: true,
-          stdio: "ignore",
-        });
-
-        startProcess.on("error", (error) => {
-          console.error("Failed to start service:", error.message);
-          process.exit(1);
-        });
-
-        startProcess.unref();
-
-        if (!(await waitForService())) {
-          // If service startup fails, try to start with default config
-          console.log(
-            "Service startup timeout, trying to start with default configuration..."
+        const started = await startServiceInBackground();
+        if (!started) {
+          console.error(
+            "Service startup failed. Please manually run `ccr start` to start the service and check the logs."
           );
-          const {
-            initDir,
-            writeConfigFile,
-            backupConfigFile,
-          } = require("./utils");
-
-          try {
-            // Initialize directories
-            await initDir();
-
-            // Backup existing config file if it exists
-            const backupPath = await backupConfigFile();
-            if (backupPath) {
-              console.log(
-                `Backed up existing configuration file to ${backupPath}`
-              );
-            }
-
-            // Create a minimal default config file
-            await writeConfigFile({
-              PORT: 3456,
-              Providers: [],
-              Router: {},
-            });
-            console.log(
-              "Created minimal default configuration file at ~/.claude-code-router/config.json"
-            );
-            console.log(
-              "Please edit this file with your actual configuration."
-            );
-
-            // Try starting the service again
-            const restartProcess = spawn("node", [cliPath, "start"], {
-              detached: true,
-              stdio: "ignore",
-            });
-
-            restartProcess.on("error", (error) => {
-              console.error(
-                "Failed to start service with default config:",
-                error.message
-              );
-              process.exit(1);
-            });
-
-            restartProcess.unref();
-
-            if (!(await waitForService(15000))) {
-              // Wait a bit longer for the first start
-              console.error(
-                "Service startup still failing. Please manually run `ccr start` to start the service and check the logs."
-              );
-              process.exit(1);
-            }
-          } catch (error: any) {
-            console.error(
-              "Failed to create default configuration:",
-              error.message
-            );
-            process.exit(1);
-          }
+          process.exit(1);
         }
       }
 

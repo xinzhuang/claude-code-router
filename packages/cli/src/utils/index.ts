@@ -10,10 +10,9 @@ import {
   PLUGINS_DIR,
   PRESETS_DIR,
   REFERENCE_COUNT_FILE,
-  readPresetFile,
 } from "@CCR/shared";
 import { getServer } from "@CCR/server";
-import { writeFileSync, existsSync, readFileSync, mkdirSync } from "fs";
+import { writeFileSync, existsSync, readFileSync } from "fs";
 import { checkForUpdates, performUpdate } from "./update";
 import { version } from "../../package.json";
 import { spawn } from "child_process";
@@ -184,11 +183,6 @@ export const initConfig = async () => {
 };
 
 export const run = async (args: string[] = []) => {
-  const isRunning = isServiceRunning()
-  if (isRunning) {
-    console.log('claude-code-router server is running');
-    return;
-  }
   const server = await getServer();
   const app = server.app;
   // Save the PID of the background process
@@ -216,6 +210,44 @@ export const run = async (args: string[] = []) => {
   // await server.start() to ensure it starts successfully and keep process alive
   await server.start();
 }
+
+export const startServiceInBackground = async (): Promise<boolean> => {
+  const isRunning = isServiceRunning();
+  if (isRunning) {
+    console.log("claude-code-router server is already running.");
+    return true;
+  }
+
+  console.log("Starting claude-code-router service in the background...");
+  const cliPath = path.join(__dirname, "cli.js");
+  const startProcess = spawn("node", [cliPath, "start"], {
+    detached: true,
+    stdio: "ignore",
+  });
+
+  startProcess.on("error", (error) => {
+    console.error("Failed to start service:", error.message);
+  });
+
+  startProcess.unref();
+
+  // Wait for service to become available
+  const startTime = Date.now();
+  const timeout = 10000;
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+
+  while (Date.now() - startTime < timeout) {
+    if (isServiceRunning()) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      console.log("✅ Service started successfully in the background.");
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  console.error("❌ Service startup timeout. Please check logs.");
+  return false;
+};
 
 export const restartService = async () => {
   // Stop the service if it's running
