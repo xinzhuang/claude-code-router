@@ -1,12 +1,13 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
-import { ArrowLeft, Send, Copy, Square, History, Maximize } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
+import { ArrowLeft, Send, Copy, Square, History, Maximize, MessageSquare } from 'lucide-react';
 import MonacoEditor from '@monaco-editor/react';
 import { RequestHistoryDrawer } from './RequestHistoryDrawer';
 import { requestHistoryDB } from '@/lib/db';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { ConversationViewer } from './ConversationViewer';
+import type { Message } from './ConversationMessage';
 
 export function DebugPage() {
   const navigate = useNavigate();
@@ -26,6 +27,11 @@ export function DebugPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isHistoryDrawerOpen, setIsHistoryDrawerOpen] = useState(false);
   const [fullscreenEditor, setFullscreenEditor] = useState<'headers' | 'body' | null>(null);
+  const [conversationData, setConversationData] = useState<{
+    messages: Message[];
+    model: string;
+    metadata: Record<string, unknown>;
+  } | null>(null);
   const headersEditorRef = useRef<any>(null);
   const bodyEditorRef = useRef<any>(null);
 
@@ -125,6 +131,21 @@ export function DebugPage() {
           headers: JSON.stringify(headers, null, 2),
           body: JSON.stringify(body, null, 2)
         });
+
+        // 提取对话数据
+        if (body && typeof body === 'object' && 'messages' in body && Array.isArray(body.messages) && body.messages.length > 0) {
+          setConversationData({
+            messages: body.messages as Message[],
+            model: (body as any).model || '',
+            metadata: {
+              url,
+              method,
+              timestamp: (body as any).timestamp || '',
+            },
+          });
+        } else {
+          setConversationData(null);
+        }
 
         console.log('Log data parsed successfully:', { url, method, headers, body });
       } catch (error) {
@@ -325,12 +346,18 @@ export function DebugPage() {
                 </Button>
               </div>
 
-              {/* Headers和Body配置 - 使用tab布局 */}
+              {/* Headers、Body和Conversation配置 - 使用tab布局 */}
               <div className="flex-1">
-                <Tabs defaultValue="headers" className="h-full flex flex-col">
-                  <TabsList className="grid w-full grid-cols-2">
+                <Tabs defaultValue={conversationData ? "conversation" : "headers"} className="h-full flex flex-col">
+                  <TabsList className={`grid w-full ${conversationData ? 'grid-cols-3' : 'grid-cols-2'}`}>
                     <TabsTrigger value="headers">Headers</TabsTrigger>
                     <TabsTrigger value="body">Body</TabsTrigger>
+                    {conversationData && (
+                      <TabsTrigger value="conversation" className="gap-1.5">
+                        <MessageSquare className="h-3.5 w-3.5" />
+                        Conversation
+                      </TabsTrigger>
+                    )}
                   </TabsList>
 
                   <TabsContent value="headers" className="flex-1 mt-2">
@@ -420,6 +447,18 @@ export function DebugPage() {
                       </div>
                     </div>
                   </TabsContent>
+
+                  {conversationData && (
+                    <TabsContent value="conversation" className="flex-1 mt-2">
+                      <div className="h-full overflow-hidden rounded-lg border border-gray-300">
+                        <ConversationViewer
+                          messages={conversationData.messages}
+                          model={conversationData.model}
+                          metadata={conversationData.metadata}
+                        />
+                      </div>
+                    </TabsContent>
+                  )}
                 </Tabs>
               </div>
             </div>
