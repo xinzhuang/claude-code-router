@@ -183,6 +183,10 @@ export const initConfig = async () => {
 };
 
 export const run = async (args: string[] = []) => {
+  if (isServiceRunning()) {
+    console.log('claude-code-router server is already running.');
+    return;
+  }
   const server = await getServer();
   const app = server.app;
   // Save the PID of the background process

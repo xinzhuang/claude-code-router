@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { restartService, startServiceInBackground } from "./utils";
+import { run, restartService, startServiceInBackground } from "./utils";
 import { showStatus } from "./utils/status";
 import { executeCodeCommand, PresetConfig } from "./utils/codeCommand";
 import {
@@ -17,6 +17,7 @@ import fs, { existsSync, readFileSync } from "fs";
 import { parseStatusLineData, StatusLineInput } from "./utils/statusline";
 import {handlePresetCommand} from "./utils/preset";
 import { handleInstallCommand } from "./utils/installCommand";
+import { handleFreeCommand } from "./commands/free";
 
 
 const command = process.argv[2];
@@ -35,6 +36,7 @@ const KNOWN_COMMANDS = [
   "activate",
   "env",
   "ui",
+  "free",
   "-v",
   "version",
   "-h",
@@ -52,6 +54,7 @@ Commands:
   statusline    Integrated statusline
   code          Execute claude command
   model         Interactive model selection and configuration
+  free          List and manage free OpenRouter models
   preset        Manage presets (export, install, list, delete)
   install       Install preset from GitHub marketplace
   activate      Output environment variables for shell integration
@@ -67,6 +70,9 @@ Examples:
   ccr code "Write a Hello World"
   ccr my-preset "Write a Hello World"    # Use preset configuration
   ccr model
+  ccr free                               # List free models
+  ccr free --update                      # Update config with free models
+  ccr free --type coding                 # Filter by type
   ccr preset export my-config            # Export current config as preset
   ccr preset install /path/to/preset     # Install a preset from directory
   ccr preset list                        # List all presets
@@ -169,7 +175,7 @@ async function main() {
 
   switch (command) {
     case "start":
-      await startServiceInBackground();
+      await run();
       break;
     case "stop":
       try {
@@ -223,6 +229,9 @@ async function main() {
     // ADD THIS CASE
     case "model":
       await runModelSelector();
+      break;
+    case "free":
+      await handleFreeCommand(process.argv.slice(3));
       break;
     case "preset":
       await handlePresetCommand(process.argv.slice(3));
