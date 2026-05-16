@@ -1,9 +1,16 @@
 import { UnifiedChatRequest } from "@/types/llm";
 import { Transformer, TransformerOptions } from "../types/transformer";
 import { v4 as uuidv4 } from "uuid";
+import { createHash } from "crypto";
+
+function generateSignature(content: string): string {
+  const hash = createHash("sha256").update(content).digest("hex");
+  return hash.slice(0, 32);
+}
 
 export class OpenrouterTransformer implements Transformer {
   static TransformerName = "openrouter";
+  logger?: any;
 
   constructor(private readonly options?: TransformerOptions) {}
 
@@ -65,24 +72,11 @@ export class OpenrouterTransformer implements Transformer {
       let hasTextContent = false;
       let reasoningContent = "";
       let isReasoningComplete = false;
-      let hasToolCall = false;
-      let buffer = ""; // 用于缓冲不完整的数据
+      let buffer = "";
 
       const stream = new ReadableStream({
         async start(controller) {
           const reader = response.body!.getReader();
-          const processBuffer = (
-            buffer: string,
-            controller: ReadableStreamDefaultController,
-            encoder: TextEncoder
-          ) => {
-            const lines = buffer.split("\n");
-            for (const line of lines) {
-              if (line.trim()) {
-                controller.enqueue(encoder.encode(line + "\n"));
-              }
-            }
-          };
 
           const processLine = (
             line: string,
@@ -97,30 +91,23 @@ export class OpenrouterTransformer implements Transformer {
               setReasoningComplete: (val: boolean) => void;
             }
           ) => {
-            const { controller, encoder } = context;
+            const { controller: ctrl, encoder: enc } = context;
 
             if (line.startsWith("data: ") && line.trim() !== "data: [DONE]") {
               const jsonStr = line.slice(6);
               try {
                 const data = JSON.parse(jsonStr);
-                if (data.usage) {
-                  this.logger?.debug(
-                    { usage: data.usage, hasToolCall },
-                    "usage"
-                  );
-                  data.choices[0].finish_reason = hasToolCall
-                    ? "tool_calls"
-                    : "stop";
-                }
 
+                // Handle upstream error chunks - send error and skip further processing
                 if (data.choices?.[0]?.finish_reason === "error") {
-                  controller.enqueue(
-                    encoder.encode(
+                  ctrl.enqueue(
+                    enc.encode(
                       `data: ${JSON.stringify({
-                        error: data.choices?.[0].error,
+                        error: data.choices?.[0]?.error,
                       })}\n\n`
                     )
                   );
+                  return;
                 }
 
                 if (
@@ -130,7 +117,7 @@ export class OpenrouterTransformer implements Transformer {
                   context.setHasTextContent(true);
                 }
 
-                // Extract reasoning_content from delta
+                // Convert reasoning → thinking (Anthropic transformer only handles thinking)
                 if (data.choices?.[0]?.delta?.reasoning) {
                   context.appendReasoningContent(
                     data.choices[0].delta.reasoning
@@ -149,24 +136,25 @@ export class OpenrouterTransformer implements Transformer {
                       },
                     ],
                   };
-                  if (thinkingChunk.choices?.[0]?.delta) {
-                    delete thinkingChunk.choices[0].delta.reasoning;
-                  }
-                  const thinkingLine = `data: ${JSON.stringify(
-                    thinkingChunk
-                  )}\n\n`;
-                  controller.enqueue(encoder.encode(thinkingLine));
+                  delete thinkingChunk.choices[0].delta.reasoning;
+                  ctrl.enqueue(
+                    enc.encode(
+                      `data: ${JSON.stringify(thinkingChunk)}\n\n`
+                    )
+                  );
                   return;
                 }
 
-                // Check if reasoning is complete
+                // Emit thinking block closure with signature when reasoning ends and text begins
                 if (
                   data.choices?.[0]?.delta?.content &&
                   context.reasoningContent() &&
                   !context.isReasoningComplete()
                 ) {
                   context.setReasoningComplete(true);
-                  const signature = Date.now().toString();
+                  const signature = generateSignature(
+                    context.reasoningContent()
+                  );
 
                   const thinkingChunk = {
                     ...data,
@@ -184,56 +172,42 @@ export class OpenrouterTransformer implements Transformer {
                       },
                     ],
                   };
-                  if (thinkingChunk.choices?.[0]?.delta) {
-                    delete thinkingChunk.choices[0].delta.reasoning;
-                  }
-                  const thinkingLine = `data: ${JSON.stringify(
-                    thinkingChunk
-                  )}\n\n`;
-                  controller.enqueue(encoder.encode(thinkingLine));
+                  delete thinkingChunk.choices[0].delta.reasoning;
+                  ctrl.enqueue(
+                    enc.encode(
+                      `data: ${JSON.stringify(thinkingChunk)}\n\n`
+                    )
+                  );
                 }
 
                 if (data.choices?.[0]?.delta?.reasoning) {
                   delete data.choices[0].delta.reasoning;
                 }
+
+                // Replace numeric tool call IDs with UUIDs (Anthropic expects string IDs)
                 if (
                   data.choices?.[0]?.delta?.tool_calls?.length &&
                   !Number.isNaN(
-                    parseInt(data.choices?.[0]?.delta?.tool_calls[0].id, 10)
+                    parseInt(
+                      data.choices?.[0]?.delta?.tool_calls[0]?.id,
+                      10
+                    )
                   )
                 ) {
-                  data.choices?.[0]?.delta?.tool_calls.forEach((tool: any) => {
-                    tool.id = `call_${uuidv4()}`;
-                  });
-                }
-
-                if (
-                  data.choices?.[0]?.delta?.tool_calls?.length &&
-                  !hasToolCall
-                ) {
-                  hasToolCall = true;
-                }
-
-                if (
-                  data.choices?.[0]?.delta?.tool_calls?.length &&
-                  context.hasTextContent()
-                ) {
-                  if (typeof data.choices[0].index === "number") {
-                    data.choices[0].index += 1;
-                  } else {
-                    data.choices[0].index = 1;
-                  }
+                  data.choices?.[0]?.delta?.tool_calls.forEach(
+                    (tool: any) => {
+                      tool.id = `call_${uuidv4()}`;
+                    }
+                  );
                 }
 
                 const modifiedLine = `data: ${JSON.stringify(data)}\n\n`;
-                controller.enqueue(encoder.encode(modifiedLine));
+                ctrl.enqueue(enc.encode(modifiedLine));
               } catch (e) {
-                // 如果JSON解析失败，可能是数据不完整，将原始行传递下去
-                controller.enqueue(encoder.encode(line + "\n"));
+                ctrl.enqueue(enc.encode(line + "\n"));
               }
             } else {
-              // Pass through non-data lines (like [DONE])
-              controller.enqueue(encoder.encode(line + "\n"));
+              ctrl.enqueue(enc.encode(line + "\n"));
             }
           };
 
@@ -241,14 +215,17 @@ export class OpenrouterTransformer implements Transformer {
             while (true) {
               const { done, value } = await reader.read();
               if (done) {
-                // 处理缓冲区中剩余的数据
                 if (buffer.trim()) {
-                  processBuffer(buffer, controller, encoder);
+                  const lines = buffer.split("\n");
+                  for (const line of lines) {
+                    if (line.trim()) {
+                      controller.enqueue(encoder.encode(line + "\n"));
+                    }
+                  }
                 }
                 break;
               }
 
-              // 检查value是否有效
               if (!value || value.length === 0) {
                 continue;
               }
@@ -267,9 +244,8 @@ export class OpenrouterTransformer implements Transformer {
 
               buffer += chunk;
 
-              // 如果缓冲区过大，进行处理避免内存泄漏
+              // Process buffer if it exceeds limit
               if (buffer.length > 1000000) {
-                // 1MB 限制
                 console.warn(
                   "Buffer size exceeds limit, processing partial data"
                 );
@@ -293,7 +269,6 @@ export class OpenrouterTransformer implements Transformer {
                       });
                     } catch (error) {
                       console.error("Error processing line:", line, error);
-                      // 如果解析失败，直接传递原始行
                       controller.enqueue(encoder.encode(line + "\n"));
                     }
                   }
@@ -301,9 +276,9 @@ export class OpenrouterTransformer implements Transformer {
                 continue;
               }
 
-              // 处理缓冲区中完整的数据行
+              // Process complete lines in buffer
               const lines = buffer.split("\n");
-              buffer = lines.pop() || ""; // 最后一行可能不完整，保留在缓冲区
+              buffer = lines.pop() || "";
 
               for (const line of lines) {
                 if (!line.trim()) continue;
@@ -318,11 +293,11 @@ export class OpenrouterTransformer implements Transformer {
                     appendReasoningContent: (content) =>
                       (reasoningContent += content),
                     isReasoningComplete: () => isReasoningComplete,
-                    setReasoningComplete: (val) => (isReasoningComplete = val),
+                    setReasoningComplete: (val) =>
+                      (isReasoningComplete = val),
                   });
                 } catch (error) {
                   console.error("Error processing line:", line, error);
-                  // 如果解析失败，直接传递原始行
                   controller.enqueue(encoder.encode(line + "\n"));
                 }
               }

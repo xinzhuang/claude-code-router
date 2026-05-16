@@ -36,9 +36,18 @@ interface RouterConfig {
   [key: string]: string | number | undefined;
 }
 
+interface FallbackConfig {
+  default?: string[];
+  background?: string[];
+  think?: string[];
+  longContext?: string[];
+  webSearch?: string[];
+}
+
 interface Config {
   Providers: Provider[];
   Router: RouterConfig;
+  fallback?: FallbackConfig;
   [key: string]: any;
 }
 
@@ -145,7 +154,24 @@ function displayCurrentConfig(config: Config): void {
     console.log(`${BOLDCYAN}Image Model:${RESET}`);
     console.log(`  ${formatModel(config.Router.image)}\n`);
   }
-  
+
+  const fallback = (config as any).fallback as FallbackConfig | undefined;
+  if (fallback) {
+    for (const { key, label } of FALLBACK_SCENARIOS) {
+      const list = fallback[key as keyof FallbackConfig];
+      if (Array.isArray(list) && list.length > 0) {
+        console.log(`${BOLDCYAN}${label} Fallback Models:${RESET}`);
+        list.forEach((m, i) => {
+          const parts = m.split(',');
+          const provider = parts[0];
+          const model = parts.slice(1).join(',');
+          console.log(`  ${i + 1}. ${YELLOW}${provider}${RESET} | ${model}`);
+        });
+        console.log('');
+      }
+    }
+  }
+
   console.log(`\n${BOLDCYAN}═══════════════════════════════════════════════${RESET}`);
   console.log(`${BOLDCYAN}           Add/Update Model${RESET}`);
   console.log(`${BOLDCYAN}═══════════════════════════════════════════════${RESET}\n`);
@@ -161,6 +187,7 @@ async function selectModelType() {
       { name: 'Long Context Model', value: 'longContext' },
       { name: 'Web Search Model', value: 'webSearch' },
       { name: 'Image Model', value: 'image' },
+      { name: 'Fallback Models', value: 'fallback' },
       { name: `${BOLDGREEN}+ Add New Model${RESET}`, value: 'addModel' }
     ]
   });
@@ -174,6 +201,122 @@ async function selectModel(config: Config, modelType: string) {
     choices: models,
     pageSize: 15
   });
+}
+
+const FALLBACK_SCENARIOS: Array<{ key: string; label: string }> = [
+  { key: 'default', label: 'Default' },
+  { key: 'background', label: 'Background' },
+  { key: 'think', label: 'Think' },
+  { key: 'longContext', label: 'Long Context' },
+  { key: 'webSearch', label: 'Web Search' },
+];
+
+async function configureFallbackModels(config: Config): Promise<void> {
+  const fallback = ((config as any).fallback as FallbackConfig) || {};
+
+  // Select which scenario to configure
+  const scenarioChoices = FALLBACK_SCENARIOS.map(s => {
+    const list = fallback[s.key as keyof FallbackConfig];
+    const count = Array.isArray(list) ? list.length : 0;
+    return {
+      name: `${s.label}${count > 0 ? DIM + ` (${count} models)` + RESET : ''}`,
+      value: s.key,
+    };
+  });
+
+  const scenario = await select({
+    message: `${BOLDYELLOW}Select scenario to configure fallback models:${RESET}`,
+    choices: scenarioChoices,
+    pageSize: 10,
+  }) as string;
+
+  const currentList = fallback[scenario as keyof FallbackConfig] || [];
+  const scenarioLabel = FALLBACK_SCENARIOS.find(s => s.key === scenario)!.label;
+
+  console.log(`\n${BOLDCYAN}${scenarioLabel} Fallback Models${RESET}`);
+  console.log(`${DIM}These models are tried in order when the ${scenarioLabel.toLowerCase()} model fails.${RESET}\n`);
+
+  if (currentList.length > 0) {
+    console.log(`${BOLDCYAN}Current fallback models:${RESET}`);
+    currentList.forEach((m, i) => {
+      const parts = m.split(',');
+      const provider = parts[0];
+      const model = parts.slice(1).join(',');
+      console.log(`  ${i + 1}. ${YELLOW}${provider}${RESET} | ${model}`);
+    });
+    console.log('');
+  }
+
+  const action = await select({
+    message: `${BOLDYELLOW}What would you like to do?${RESET}`,
+    choices: [
+      { name: 'Add fallback model', value: 'add' },
+      ...(currentList.length > 0 ? [
+        { name: 'Remove fallback model', value: 'remove' },
+        { name: 'Clear all fallback models', value: 'clear' },
+      ] : []),
+    ]
+  }) as string;
+
+  if (action === 'add') {
+    const models = getAllModels(config);
+    const selected = await select({
+      message: `\n${BOLDYELLOW}Select a fallback model to add:${RESET}`,
+      choices: models,
+      pageSize: 15,
+    }) as string;
+
+    if (!currentList.includes(selected)) {
+      const newList = [...currentList, selected];
+      fallback[scenario as keyof FallbackConfig] = newList;
+      (config as any).fallback = fallback;
+      saveConfig(config);
+      const parts = selected.split(',');
+      console.log(`${GREEN}✓ Added fallback model: ${parts[0]},${parts.slice(1).join(',')}${RESET}\n`);
+    } else {
+      console.log(`${YELLOW}Model already in fallback list${RESET}\n`);
+    }
+  } else if (action === 'remove') {
+    const selected = await select({
+      message: `\n${BOLDYELLOW}Select a fallback model to remove:${RESET}`,
+      choices: currentList.map((m, i) => {
+        const parts = m.split(',');
+        return {
+          name: `${i + 1}. ${parts[0]} | ${parts.slice(1).join(',')}`,
+          value: m,
+        };
+      }),
+    }) as string;
+
+    const idx = currentList.indexOf(selected);
+    if (idx !== -1) {
+      const newList = [...currentList];
+      newList.splice(idx, 1);
+      if (newList.length === 0) {
+        delete fallback[scenario as keyof FallbackConfig];
+        if (Object.keys(fallback).length === 0) {
+          delete (config as any).fallback;
+        } else {
+          (config as any).fallback = fallback;
+        }
+      } else {
+        fallback[scenario as keyof FallbackConfig] = newList;
+        (config as any).fallback = fallback;
+      }
+      saveConfig(config);
+      const parts = selected.split(',');
+      console.log(`${GREEN}✓ Removed fallback model: ${parts[0]},${parts.slice(1).join(',')}${RESET}\n`);
+    }
+  } else if (action === 'clear') {
+    delete fallback[scenario as keyof FallbackConfig];
+    if (Object.keys(fallback).length === 0) {
+      delete (config as any).fallback;
+    } else {
+      (config as any).fallback = fallback;
+    }
+    saveConfig(config);
+    console.log(`${GREEN}✓ Cleared all fallback models for ${scenarioLabel}${RESET}\n`);
+  }
 }
 
 async function configureTransformers(): Promise<TransformerConfig | undefined> {
@@ -439,18 +582,22 @@ export async function runModelSelector(): Promise<void> {
     
     if (action === 'addModel') {
       const result = await addNewModel(config);
-      
+
       if (result) {
         config = loadConfig();
         config.Router[result.modelType] = `${result.providerName},${result.modelName}`;
         saveConfig(config);
         console.log(`${GREEN}✓ ${result.modelType} set to ${result.providerName},${result.modelName}${RESET}`);
       }
+    } else if (action === 'fallback') {
+      config = loadConfig();
+      await configureFallbackModels(config);
+      config = loadConfig();
     } else {
       const selectedModel = await selectModel(config, action) as string;
       config.Router[action] = selectedModel;
       saveConfig(config);
-      
+
       console.log(`${GREEN}✓ ${action} model updated to: ${selectedModel}${RESET}`);
     }
     

@@ -175,5 +175,24 @@
     "longContext": "gemini-cli,gemini-2.5-pro",
     "webSearch": "gemini-cli,gemini-2.5-flash"
   },
+  "fallback": {
+    "default": [
+      "openrouter,anthropic/claude-sonnet-4",
+      "deepseek,deepseek-chat"
+    ],
+    "background": [
+      "gemini-cli,gemini-2.5-flash"
+    ],
+    "think": [
+      "openrouter,anthropic/claude-sonnet-4"
+    ],
+    "longContext": [
+      "openrouter,anthropic/claude-sonnet-4",
+      "deepseek,deepseek-chat"
+    ],
+    "webSearch": [
+      "gemini-cli,gemini-2.5-flash"
+    ]
+  },
   "NON_INTERACTIVE_MODE": false
 }

@@ -121,6 +121,33 @@ const sidebars: SidebarsConfig = {
       },
       items: ['presets/intro'],
     },
+    {
+      type: 'category',
+      label: 'Integrations',
+      link: {
+        type: 'generated-index',
+        title: 'Provider Integrations',
+        description: 'Guides for integrating different LLM providers',
+        slug: 'category/integrations',
+      },
+      items: [
+        {
+          type: 'category',
+          label: 'OpenRouter',
+          link: {
+            type: 'generated-index',
+            title: 'OpenRouter Integration',
+            description: 'Complete guide for OpenRouter integration',
+            slug: 'category/openrouter',
+          },
+          items: [
+            'integrations/openrouter/intro',
+            'integrations/openrouter/configuration',
+            'integrations/openrouter/advanced',
+          ],
+        },
+      ],
+    },
   ],
 };
 

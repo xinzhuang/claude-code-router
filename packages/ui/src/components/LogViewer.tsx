@@ -4,7 +4,9 @@ import Editor from '@monaco-editor/react';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
 import { useTranslation } from 'react-i18next';
-import { X, RefreshCw, Download, Trash2, ArrowLeft, File, Layers, Bug } from 'lucide-react';
+import { X, RefreshCw, Download, Trash2, ArrowLeft, File, Layers, MessageSquare, Code2 } from 'lucide-react';
+import { ConversationViewer } from './ConversationViewer';
+import type { Message } from './ConversationMessage';
 
 interface LogViewerProps {
   open: boolean;
@@ -26,10 +28,6 @@ interface LogFile {
   path: string;
   size: number;
   lastModified: string;
-}
-
-interface GroupedLogs {
-  [reqId: string]: LogEntry[];
 }
 
 interface LogGroupSummary {
@@ -63,6 +61,12 @@ export function LogViewer({ open, onOpenChange, showToast }: LogViewerProps) {
   const [groupByReqId, setGroupByReqId] = useState(false);
   const [groupedLogs, setGroupedLogs] = useState<GroupedLogsResponse | null>(null);
   const [selectedReqId, setSelectedReqId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'raw' | 'conversation'>('raw');
+  const [conversationData, setConversationData] = useState<{
+    messages: Message[];
+    model: string;
+    metadata: Record<string, unknown>;
+  } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const refreshInterval = useRef<NodeJS.Timeout | null>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -286,16 +290,11 @@ export function LogViewer({ open, onOpenChange, showToast }: LogViewerProps) {
         // 现在接口返回的是原始日志字符串数组，直接存储
         setLogs(response);
 
+        // 尝试提取对话数据
+        tryExtractConversationData(response);
+
         // 如果启用了分组，使用Web Worker进行聚合（需要转换为LogEntry格式供Worker使用）
         if (groupByReqId && workerRef.current) {
-          // const workerLogs: LogEntry[] = response.map((logLine, index) => ({
-          //   timestamp: new Date().toISOString(),
-          //   level: 'info',
-          //   message: logLine,
-          //   source: undefined,
-          //   reqId: undefined
-          // }));
-
           workerRef.current.postMessage({
             type: 'groupLogsByReqId',
             data: { logs: response }
@@ -306,6 +305,8 @@ export function LogViewer({ open, onOpenChange, showToast }: LogViewerProps) {
       } else {
         setLogs([]);
         setGroupedLogs(null);
+        setConversationData(null);
+        setViewMode('raw');
         if (showToast) {
           showToast(t('log_viewer.no_logs_available'), 'warning');
         }
@@ -317,6 +318,48 @@ export function LogViewer({ open, onOpenChange, showToast }: LogViewerProps) {
       }
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Extract conversation data from log entries
+  const extractConversationData = (logEntries: any[]): {
+    messages: Message[];
+    model: string;
+    metadata: Record<string, unknown>;
+  } | null => {
+    for (const log of logEntries) {
+      try {
+        const parsed = typeof log === 'string' ? JSON.parse(log) : log;
+        if (parsed.type === 'request body' && parsed.data) {
+          const data = parsed.data;
+          if (data.messages && Array.isArray(data.messages) && data.messages.length > 0) {
+            return {
+              messages: data.messages,
+              model: data.model || '',
+              metadata: {
+                url: parsed.url || data.url || '',
+                method: parsed.method || 'POST',
+                timestamp: parsed.time || parsed.timestamp || '',
+                reqId: parsed.reqId || '',
+              },
+            };
+          }
+        }
+      } catch {
+        // skip unparseable entries
+      }
+    }
+    return null;
+  };
+
+  // Try to extract conversation data from current logs
+  const tryExtractConversationData = (logEntries: any[]) => {
+    const conv = extractConversationData(logEntries);
+    setConversationData(conv);
+    if (conv) {
+      setViewMode('conversation');
+    } else {
+      setViewMode('raw');
     }
   };
 
@@ -364,32 +407,12 @@ export function LogViewer({ open, onOpenChange, showToast }: LogViewerProps) {
 
   const selectReqId = (reqId: string) => {
     setSelectedReqId(reqId);
-  };
-
-
-  const getDisplayLogs = () => {
-    if (groupByReqId && groupedLogs) {
-      if (selectedReqId && groupedLogs.groups[selectedReqId]) {
-        return groupedLogs.groups[selectedReqId];
-      }
-      // 当在分组模式但没有选中具体请求时，显示原始日志字符串数组
-      return logs.map(logLine => ({
-        timestamp: new Date().toISOString(),
-        level: 'info',
-        message: logLine,
-        source: undefined,
-        reqId: undefined
-      }));
+    // Try to extract conversation data from this request's logs
+    if (groupedLogs && groupedLogs.groups[reqId]) {
+      tryExtractConversationData(groupedLogs.groups[reqId]);
     }
-    // 当不在分组模式时，显示原始日志字符串数组
-    return logs.map(logLine => ({
-      timestamp: new Date().toISOString(),
-      level: 'info',
-      message: logLine,
-      source: undefined,
-      reqId: undefined
-    }));
   };
+
 
   const downloadLogs = () => {
     if (!selectedFile || logs.length === 0) return;
@@ -760,6 +783,21 @@ export function LogViewer({ open, onOpenChange, showToast }: LogViewerProps) {
                   <Layers className="h-4 w-4 mr-2" />
                   {groupByReqId ? t('log_viewer.grouped_on') : t('log_viewer.group_by_req_id')}
                 </Button>
+                {conversationData && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setViewMode(viewMode === 'raw' ? 'conversation' : 'raw')}
+                    className={viewMode === 'conversation' ? 'bg-violet-100 text-violet-700' : ''}
+                  >
+                    {viewMode === 'conversation' ? (
+                      <Code2 className="h-4 w-4 mr-2" />
+                    ) : (
+                      <MessageSquare className="h-4 w-4 mr-2" />
+                    )}
+                    {viewMode === 'conversation' ? 'Raw JSON' : 'Conversation'}
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
                   size="sm"
@@ -847,27 +885,35 @@ export function LogViewer({ open, onOpenChange, showToast }: LogViewerProps) {
                   </div>
                 </div>
               ) : (
-                // 显示日志内容
+                // 显示日志内容 — raw JSON or conversation view
                 <div className="relative h-full">
-                  <Editor
-                    height="100%"
-                    defaultLanguage="json"
-                    value={formatLogsForEditor()}
-                    theme="vs"
-                    options={{
-                      minimap: { enabled: true },
-                      fontSize: 14,
-                      scrollBeyondLastLine: false,
-                      automaticLayout: true,
-                      wordWrap: 'on',
-                      readOnly: true,
-                      lineNumbers: 'on',
-                      folding: true,
-                      renderWhitespace: 'all',
-                      glyphMargin: true,
-                    }}
-                    onMount={configureEditor}
-                  />
+                  {viewMode === 'conversation' && conversationData ? (
+                    <ConversationViewer
+                      messages={conversationData.messages}
+                      model={conversationData.model}
+                      metadata={conversationData.metadata}
+                    />
+                  ) : (
+                    <Editor
+                      height="100%"
+                      defaultLanguage="json"
+                      value={formatLogsForEditor()}
+                      theme="vs"
+                      options={{
+                        minimap: { enabled: true },
+                        fontSize: 14,
+                        scrollBeyondLastLine: false,
+                        automaticLayout: true,
+                        wordWrap: 'on',
+                        readOnly: true,
+                        lineNumbers: 'on',
+                        folding: true,
+                        renderWhitespace: 'all',
+                        glyphMargin: true,
+                      }}
+                      onMount={configureEditor}
+                    />
+                  )}
                 </div>
               )}
             </>
