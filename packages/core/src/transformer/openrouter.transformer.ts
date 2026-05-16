@@ -3,110 +3,9 @@ import { Transformer, TransformerOptions } from "../types/transformer";
 import { v4 as uuidv4 } from "uuid";
 import { createHash } from "crypto";
 
-// Anthropic stop reasons
-type AnthropicStopReason =
-  | "end_turn"
-  | "max_tokens"
-  | "stop_sequence"
-  | "tool_use"
-  | "pause_turn"
-  | "refusal";
-
-// Anthropic usage interface
-interface AnthropicUsage {
-  input_tokens: number;
-  output_tokens: number;
-  cache_creation_input_tokens?: number;
-  cache_read_input_tokens?: number;
-  cache_creation?: {
-    ephemeral_5m_input_tokens: number;
-    ephemeral_1h_input_tokens: number;
-  };
-  server_tool_use?: {
-    web_fetch_requests: number;
-    web_search_requests: number;
-  };
-  service_tier?: "standard" | "priority" | "batch";
-  inference_geo?: string;
-}
-
-// Anthropic content block types
-interface ThinkingBlock {
-  type: "thinking";
-  thinking: string;
-  signature: string;
-}
-
-/**
- * Map OpenRouter finish_reason to Anthropic stop_reason
- */
-function mapFinishReason(
-  finishReason: string,
-  hasToolCall: boolean
-): AnthropicStopReason {
-  if (hasToolCall) return "tool_use";
-
-  const mapping: Record<string, AnthropicStopReason> = {
-    stop: "end_turn",
-    length: "max_tokens",
-    tool_calls: "tool_use",
-    content_filter: "refusal",
-  };
-
-  return mapping[finishReason] || "end_turn";
-}
-
-/**
- * Transform OpenRouter usage to Anthropic format
- */
-function transformUsage(openrouterUsage: any): AnthropicUsage {
-  return {
-    input_tokens: openrouterUsage.prompt_tokens || 0,
-    output_tokens: openrouterUsage.completion_tokens || 0,
-    cache_creation_input_tokens:
-      openrouterUsage.cache_creation_input_tokens || 0,
-    cache_read_input_tokens: openrouterUsage.cache_read_input_tokens || 0,
-    cache_creation: openrouterUsage.cache_creation
-      ? {
-          ephemeral_5m_input_tokens:
-            openrouterUsage.cache_creation.ephemeral_5m_input_tokens || 0,
-          ephemeral_1h_input_tokens:
-            openrouterUsage.cache_creation.ephemeral_1h_input_tokens || 0,
-        }
-      : undefined,
-    server_tool_use: openrouterUsage.server_tool_use
-      ? {
-          web_fetch_requests:
-            openrouterUsage.server_tool_use.web_fetch_requests || 0,
-          web_search_requests:
-            openrouterUsage.server_tool_use.web_search_requests || 0,
-        }
-      : undefined,
-    service_tier: openrouterUsage.service_tier,
-    inference_geo: openrouterUsage.inference_geo,
-  };
-}
-
-/**
- * Generate signature for thinking block
- */
 function generateSignature(content: string): string {
   const hash = createHash("sha256").update(content).digest("hex");
   return hash.slice(0, 32);
-}
-
-/**
- * Create thinking block with signature
- */
-function createThinkingBlock(
-  content: string,
-  signature?: string
-): ThinkingBlock {
-  return {
-    type: "thinking",
-    thinking: content,
-    signature: signature || generateSignature(content),
-  };
 }
 
 export class OpenrouterTransformer implements Transformer {
@@ -169,29 +68,15 @@ export class OpenrouterTransformer implements Transformer {
 
       const decoder = new TextDecoder();
       const encoder = new TextEncoder();
-      const logger = this.logger;
 
       let hasTextContent = false;
       let reasoningContent = "";
       let isReasoningComplete = false;
-      let hasToolCall = false;
       let buffer = "";
 
       const stream = new ReadableStream({
         async start(controller) {
           const reader = response.body!.getReader();
-          const processBuffer = (
-            buffer: string,
-            controller: ReadableStreamDefaultController,
-            encoder: TextEncoder
-          ) => {
-            const lines = buffer.split("\n");
-            for (const line of lines) {
-              if (line.trim()) {
-                controller.enqueue(encoder.encode(line + "\n"));
-              }
-            }
-          };
 
           const processLine = (
             line: string,
@@ -206,38 +91,23 @@ export class OpenrouterTransformer implements Transformer {
               setReasoningComplete: (val: boolean) => void;
             }
           ) => {
-            const { controller, encoder } = context;
+            const { controller: ctrl, encoder: enc } = context;
 
             if (line.startsWith("data: ") && line.trim() !== "data: [DONE]") {
               const jsonStr = line.slice(6);
               try {
                 const data = JSON.parse(jsonStr);
 
-                // Transform usage to Anthropic format
-                if (data.usage) {
-                  logger?.debug(
-                    { usage: data.usage, hasToolCall },
-                    "usage"
-                  );
-                  data.usage = transformUsage(data.usage);
-                }
-
-                // Map finish_reason to Anthropic stop_reason
-                if (data.choices?.[0]?.finish_reason) {
-                  data.choices[0].stop_reason = mapFinishReason(
-                    data.choices[0].finish_reason,
-                    hasToolCall
-                  );
-                }
-
+                // Handle upstream error chunks - send error and skip further processing
                 if (data.choices?.[0]?.finish_reason === "error") {
-                  controller.enqueue(
-                    encoder.encode(
+                  ctrl.enqueue(
+                    enc.encode(
                       `data: ${JSON.stringify({
-                        error: data.choices?.[0].error,
+                        error: data.choices?.[0]?.error,
                       })}\n\n`
                     )
                   );
+                  return;
                 }
 
                 if (
@@ -247,12 +117,9 @@ export class OpenrouterTransformer implements Transformer {
                   context.setHasTextContent(true);
                 }
 
-                // Extract reasoning_content from delta
+                // Convert reasoning → thinking (Anthropic transformer only handles thinking)
                 if (data.choices?.[0]?.delta?.reasoning) {
                   context.appendReasoningContent(
-                    data.choices[0].delta.reasoning
-                  );
-                  const thinkingBlock = createThinkingBlock(
                     data.choices[0].delta.reasoning
                   );
                   const thinkingChunk = {
@@ -262,29 +129,30 @@ export class OpenrouterTransformer implements Transformer {
                         ...data.choices?.[0],
                         delta: {
                           ...data.choices[0].delta,
-                          thinking: thinkingBlock,
+                          thinking: {
+                            content: data.choices[0].delta.reasoning,
+                          },
                         },
                       },
                     ],
                   };
-                  if (thinkingChunk.choices?.[0]?.delta) {
-                    delete thinkingChunk.choices[0].delta.reasoning;
-                  }
-                  const thinkingLine = `data: ${JSON.stringify(
-                    thinkingChunk
-                  )}\n\n`;
-                  controller.enqueue(encoder.encode(thinkingLine));
+                  delete thinkingChunk.choices[0].delta.reasoning;
+                  ctrl.enqueue(
+                    enc.encode(
+                      `data: ${JSON.stringify(thinkingChunk)}\n\n`
+                    )
+                  );
                   return;
                 }
 
-                // Check if reasoning is complete
+                // Emit thinking block closure with signature when reasoning ends and text begins
                 if (
                   data.choices?.[0]?.delta?.content &&
                   context.reasoningContent() &&
                   !context.isReasoningComplete()
                 ) {
                   context.setReasoningComplete(true);
-                  const thinkingBlock = createThinkingBlock(
+                  const signature = generateSignature(
                     context.reasoningContent()
                   );
 
@@ -296,63 +164,50 @@ export class OpenrouterTransformer implements Transformer {
                         delta: {
                           ...data.choices[0].delta,
                           content: null,
-                          thinking: thinkingBlock,
+                          thinking: {
+                            content: context.reasoningContent(),
+                            signature: signature,
+                          },
                         },
                       },
                     ],
                   };
-                  if (thinkingChunk.choices?.[0]?.delta) {
-                    delete thinkingChunk.choices[0].delta.reasoning;
-                  }
-                  const thinkingLine = `data: ${JSON.stringify(
-                    thinkingChunk
-                  )}\n\n`;
-                  controller.enqueue(encoder.encode(thinkingLine));
+                  delete thinkingChunk.choices[0].delta.reasoning;
+                  ctrl.enqueue(
+                    enc.encode(
+                      `data: ${JSON.stringify(thinkingChunk)}\n\n`
+                    )
+                  );
                 }
 
                 if (data.choices?.[0]?.delta?.reasoning) {
                   delete data.choices[0].delta.reasoning;
                 }
 
-                // Process tool calls
+                // Replace numeric tool call IDs with UUIDs (Anthropic expects string IDs)
                 if (
                   data.choices?.[0]?.delta?.tool_calls?.length &&
                   !Number.isNaN(
-                    parseInt(data.choices?.[0]?.delta?.tool_calls[0].id, 10)
+                    parseInt(
+                      data.choices?.[0]?.delta?.tool_calls[0]?.id,
+                      10
+                    )
                   )
                 ) {
-                  data.choices?.[0]?.delta?.tool_calls.forEach((tool: any) => {
-                    tool.id = `call_${uuidv4()}`;
-                  });
-                }
-
-                if (
-                  data.choices?.[0]?.delta?.tool_calls?.length &&
-                  !hasToolCall
-                ) {
-                  hasToolCall = true;
-                }
-
-                if (
-                  data.choices?.[0]?.delta?.tool_calls?.length &&
-                  context.hasTextContent()
-                ) {
-                  if (typeof data.choices[0].index === "number") {
-                    data.choices[0].index += 1;
-                  } else {
-                    data.choices[0].index = 1;
-                  }
+                  data.choices?.[0]?.delta?.tool_calls.forEach(
+                    (tool: any) => {
+                      tool.id = `call_${uuidv4()}`;
+                    }
+                  );
                 }
 
                 const modifiedLine = `data: ${JSON.stringify(data)}\n\n`;
-                controller.enqueue(encoder.encode(modifiedLine));
+                ctrl.enqueue(enc.encode(modifiedLine));
               } catch (e) {
-                // If JSON parsing fails, pass through the original line
-                controller.enqueue(encoder.encode(line + "\n"));
+                ctrl.enqueue(enc.encode(line + "\n"));
               }
             } else {
-              // Pass through non-data lines (like [DONE])
-              controller.enqueue(encoder.encode(line + "\n"));
+              ctrl.enqueue(enc.encode(line + "\n"));
             }
           };
 
@@ -361,7 +216,12 @@ export class OpenrouterTransformer implements Transformer {
               const { done, value } = await reader.read();
               if (done) {
                 if (buffer.trim()) {
-                  processBuffer(buffer, controller, encoder);
+                  const lines = buffer.split("\n");
+                  for (const line of lines) {
+                    if (line.trim()) {
+                      controller.enqueue(encoder.encode(line + "\n"));
+                    }
+                  }
                 }
                 break;
               }
@@ -433,7 +293,8 @@ export class OpenrouterTransformer implements Transformer {
                     appendReasoningContent: (content) =>
                       (reasoningContent += content),
                     isReasoningComplete: () => isReasoningComplete,
-                    setReasoningComplete: (val) => (isReasoningComplete = val),
+                    setReasoningComplete: (val) =>
+                      (isReasoningComplete = val),
                   });
                 } catch (error) {
                   console.error("Error processing line:", line, error);
