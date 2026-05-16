@@ -1,9 +1,117 @@
 import { UnifiedChatRequest } from "@/types/llm";
 import { Transformer, TransformerOptions } from "../types/transformer";
 import { v4 as uuidv4 } from "uuid";
+import { createHash } from "crypto";
+
+// Anthropic stop reasons
+type AnthropicStopReason =
+  | "end_turn"
+  | "max_tokens"
+  | "stop_sequence"
+  | "tool_use"
+  | "pause_turn"
+  | "refusal";
+
+// Anthropic usage interface
+interface AnthropicUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation?: {
+    ephemeral_5m_input_tokens: number;
+    ephemeral_1h_input_tokens: number;
+  };
+  server_tool_use?: {
+    web_fetch_requests: number;
+    web_search_requests: number;
+  };
+  service_tier?: "standard" | "priority" | "batch";
+  inference_geo?: string;
+}
+
+// Anthropic content block types
+interface ThinkingBlock {
+  type: "thinking";
+  thinking: string;
+  signature: string;
+}
+
+/**
+ * Map OpenRouter finish_reason to Anthropic stop_reason
+ */
+function mapFinishReason(
+  finishReason: string,
+  hasToolCall: boolean
+): AnthropicStopReason {
+  if (hasToolCall) return "tool_use";
+
+  const mapping: Record<string, AnthropicStopReason> = {
+    stop: "end_turn",
+    length: "max_tokens",
+    tool_calls: "tool_use",
+    content_filter: "refusal",
+  };
+
+  return mapping[finishReason] || "end_turn";
+}
+
+/**
+ * Transform OpenRouter usage to Anthropic format
+ */
+function transformUsage(openrouterUsage: any): AnthropicUsage {
+  return {
+    input_tokens: openrouterUsage.prompt_tokens || 0,
+    output_tokens: openrouterUsage.completion_tokens || 0,
+    cache_creation_input_tokens:
+      openrouterUsage.cache_creation_input_tokens || 0,
+    cache_read_input_tokens: openrouterUsage.cache_read_input_tokens || 0,
+    cache_creation: openrouterUsage.cache_creation
+      ? {
+          ephemeral_5m_input_tokens:
+            openrouterUsage.cache_creation.ephemeral_5m_input_tokens || 0,
+          ephemeral_1h_input_tokens:
+            openrouterUsage.cache_creation.ephemeral_1h_input_tokens || 0,
+        }
+      : undefined,
+    server_tool_use: openrouterUsage.server_tool_use
+      ? {
+          web_fetch_requests:
+            openrouterUsage.server_tool_use.web_fetch_requests || 0,
+          web_search_requests:
+            openrouterUsage.server_tool_use.web_search_requests || 0,
+        }
+      : undefined,
+    service_tier: openrouterUsage.service_tier,
+    inference_geo: openrouterUsage.inference_geo,
+  };
+}
+
+/**
+ * Generate signature for thinking block
+ */
+function generateSignature(content: string): string {
+  const hash = createHash("sha256").update(content).digest("hex");
+  return hash.slice(0, 32);
+}
+
+/**
+ * Create thinking block with signature
+ */
+function createThinkingBlock(
+  content: string,
+  signature?: string
+): ThinkingBlock {
+  return {
+    type: "thinking",
+    thinking: content,
+    signature: signature || generateSignature(content),
+  };
+}
 
 export class OpenrouterTransformer implements Transformer {
   static TransformerName = "openrouter";
+  logger?: any;
 
   constructor(private readonly options?: TransformerOptions) {}
 
@@ -61,12 +169,13 @@ export class OpenrouterTransformer implements Transformer {
 
       const decoder = new TextDecoder();
       const encoder = new TextEncoder();
+      const logger = this.logger;
 
       let hasTextContent = false;
       let reasoningContent = "";
       let isReasoningComplete = false;
       let hasToolCall = false;
-      let buffer = ""; // 用于缓冲不完整的数据
+      let buffer = "";
 
       const stream = new ReadableStream({
         async start(controller) {
@@ -103,14 +212,22 @@ export class OpenrouterTransformer implements Transformer {
               const jsonStr = line.slice(6);
               try {
                 const data = JSON.parse(jsonStr);
+
+                // Transform usage to Anthropic format
                 if (data.usage) {
-                  this.logger?.debug(
+                  logger?.debug(
                     { usage: data.usage, hasToolCall },
                     "usage"
                   );
-                  data.choices[0].finish_reason = hasToolCall
-                    ? "tool_calls"
-                    : "stop";
+                  data.usage = transformUsage(data.usage);
+                }
+
+                // Map finish_reason to Anthropic stop_reason
+                if (data.choices?.[0]?.finish_reason) {
+                  data.choices[0].stop_reason = mapFinishReason(
+                    data.choices[0].finish_reason,
+                    hasToolCall
+                  );
                 }
 
                 if (data.choices?.[0]?.finish_reason === "error") {
@@ -135,6 +252,9 @@ export class OpenrouterTransformer implements Transformer {
                   context.appendReasoningContent(
                     data.choices[0].delta.reasoning
                   );
+                  const thinkingBlock = createThinkingBlock(
+                    data.choices[0].delta.reasoning
+                  );
                   const thinkingChunk = {
                     ...data,
                     choices: [
@@ -142,9 +262,7 @@ export class OpenrouterTransformer implements Transformer {
                         ...data.choices?.[0],
                         delta: {
                           ...data.choices[0].delta,
-                          thinking: {
-                            content: data.choices[0].delta.reasoning,
-                          },
+                          thinking: thinkingBlock,
                         },
                       },
                     ],
@@ -166,7 +284,9 @@ export class OpenrouterTransformer implements Transformer {
                   !context.isReasoningComplete()
                 ) {
                   context.setReasoningComplete(true);
-                  const signature = Date.now().toString();
+                  const thinkingBlock = createThinkingBlock(
+                    context.reasoningContent()
+                  );
 
                   const thinkingChunk = {
                     ...data,
@@ -176,10 +296,7 @@ export class OpenrouterTransformer implements Transformer {
                         delta: {
                           ...data.choices[0].delta,
                           content: null,
-                          thinking: {
-                            content: context.reasoningContent(),
-                            signature: signature,
-                          },
+                          thinking: thinkingBlock,
                         },
                       },
                     ],
@@ -196,6 +313,8 @@ export class OpenrouterTransformer implements Transformer {
                 if (data.choices?.[0]?.delta?.reasoning) {
                   delete data.choices[0].delta.reasoning;
                 }
+
+                // Process tool calls
                 if (
                   data.choices?.[0]?.delta?.tool_calls?.length &&
                   !Number.isNaN(
@@ -228,7 +347,7 @@ export class OpenrouterTransformer implements Transformer {
                 const modifiedLine = `data: ${JSON.stringify(data)}\n\n`;
                 controller.enqueue(encoder.encode(modifiedLine));
               } catch (e) {
-                // 如果JSON解析失败，可能是数据不完整，将原始行传递下去
+                // If JSON parsing fails, pass through the original line
                 controller.enqueue(encoder.encode(line + "\n"));
               }
             } else {
@@ -241,14 +360,12 @@ export class OpenrouterTransformer implements Transformer {
             while (true) {
               const { done, value } = await reader.read();
               if (done) {
-                // 处理缓冲区中剩余的数据
                 if (buffer.trim()) {
                   processBuffer(buffer, controller, encoder);
                 }
                 break;
               }
 
-              // 检查value是否有效
               if (!value || value.length === 0) {
                 continue;
               }
@@ -267,9 +384,8 @@ export class OpenrouterTransformer implements Transformer {
 
               buffer += chunk;
 
-              // 如果缓冲区过大，进行处理避免内存泄漏
+              // Process buffer if it exceeds limit
               if (buffer.length > 1000000) {
-                // 1MB 限制
                 console.warn(
                   "Buffer size exceeds limit, processing partial data"
                 );
@@ -293,7 +409,6 @@ export class OpenrouterTransformer implements Transformer {
                       });
                     } catch (error) {
                       console.error("Error processing line:", line, error);
-                      // 如果解析失败，直接传递原始行
                       controller.enqueue(encoder.encode(line + "\n"));
                     }
                   }
@@ -301,9 +416,9 @@ export class OpenrouterTransformer implements Transformer {
                 continue;
               }
 
-              // 处理缓冲区中完整的数据行
+              // Process complete lines in buffer
               const lines = buffer.split("\n");
-              buffer = lines.pop() || ""; // 最后一行可能不完整，保留在缓冲区
+              buffer = lines.pop() || "";
 
               for (const line of lines) {
                 if (!line.trim()) continue;
@@ -322,7 +437,6 @@ export class OpenrouterTransformer implements Transformer {
                   });
                 } catch (error) {
                   console.error("Error processing line:", line, error);
-                  // 如果解析失败，直接传递原始行
                   controller.enqueue(encoder.encode(line + "\n"));
                 }
               }
