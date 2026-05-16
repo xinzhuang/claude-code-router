@@ -106,9 +106,22 @@ export function ConfigProvider({ children }: ConfigProviderProps) {
             webSearch: '',
             image: ''
           },
+          fallback: data.fallback && typeof data.fallback === 'object' ? {
+            default: Array.isArray(data.fallback.default) ? data.fallback.default.filter((v: unknown) => typeof v === 'string') : [],
+            background: Array.isArray(data.fallback.background) ? data.fallback.background.filter((v: unknown) => typeof v === 'string') : [],
+            think: Array.isArray(data.fallback.think) ? data.fallback.think.filter((v: unknown) => typeof v === 'string') : [],
+            longContext: Array.isArray(data.fallback.longContext) ? data.fallback.longContext.filter((v: unknown) => typeof v === 'string') : [],
+            webSearch: Array.isArray(data.fallback.webSearch) ? data.fallback.webSearch.filter((v: unknown) => typeof v === 'string') : [],
+          } : {
+            default: [],
+            background: [],
+            think: [],
+            longContext: [],
+            webSearch: [],
+          },
           CUSTOM_ROUTER_PATH: typeof data.CUSTOM_ROUTER_PATH === 'string' ? data.CUSTOM_ROUTER_PATH : ''
         };
-        
+
         setConfig(validConfig);
       } catch (err) {
         console.error('Failed to fetch config:', err);
@@ -136,6 +149,13 @@ export function ConfigProvider({ children }: ConfigProviderProps) {
               longContextThreshold: 60000,
               webSearch: '',
               image: ''
+            },
+            fallback: {
+              default: [],
+              background: [],
+              think: [],
+              longContext: [],
+              webSearch: [],
             },
             CUSTOM_ROUTER_PATH: ''
           });

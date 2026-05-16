@@ -22,6 +22,14 @@ export interface RouterConfig {
     custom?: any;
 }
 
+export interface FallbackConfig {
+    default?: string[];
+    background?: string[];
+    think?: string[];
+    longContext?: string[];
+    webSearch?: string[];
+}
+
 export interface Transformer {
     name?: string;
     path: string;
@@ -52,6 +60,7 @@ export interface StatusLineConfig {
 export interface Config {
   Providers: Provider[];
   Router: RouterConfig;
+  fallback?: FallbackConfig;
   transformers: Transformer[];
   StatusLine?: StatusLineConfig;
   forceUseImageAgent?: boolean;
