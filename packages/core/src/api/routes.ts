@@ -189,7 +189,7 @@ async function handleFallback(
     }
   }
 
-  req.log.error(`All fallback models failed for yichu ${scenarioType}`);
+  req.log.error(`All fallback models failed for scenario ${scenarioType}`);
   return null;
 }
 
