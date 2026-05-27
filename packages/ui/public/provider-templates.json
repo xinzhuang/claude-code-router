@@ -1,0 +1,33 @@
+[
+  {
+    "name": "zhipu-anthropic",
+    "api_base_url": "https://open.bigmodel.cn/api/anthropic/v1/messages",
+    "api_key": "",
+    "models": [
+      "glm-4-plus",
+      "glm-4-0520",
+      "glm-4-long",
+      "glm-4-flash",
+      "glm-4-air"
+    ],
+    "transformer": {
+      "use": [
+        ["Anthropic", {"UseBearer": true}]
+      ]
+    }
+  },
+  {
+    "name": "xiaomi-mimo",
+    "api_base_url": "https://api.xiaomimimo.com/anthropic/v1/messages",
+    "api_key": "",
+    "models": [
+      "mimo-v2-flash",
+      "mimo-v2-pro"
+    ],
+    "transformer": {
+      "use": [
+        ["Anthropic", {"UseBearer": true}]
+      ]
+    }
+  }
+]

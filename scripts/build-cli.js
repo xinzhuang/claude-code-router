@@ -75,6 +75,18 @@ try {
     console.warn('⚠ Warning: index.html not found in UI dist, skipping...');
   }
 
+  // Step 6.5: Copy provider-templates.json from UI dist to CLI dist
+  console.log('Copying provider-templates.json from UI to CLI dist...');
+  const templatesSource = path.join(uiDir, 'dist/provider-templates.json');
+  const templatesDest = path.join(cliDistDir, 'provider-templates.json');
+
+  if (fs.existsSync(templatesSource)) {
+    fs.copyFileSync(templatesSource, templatesDest);
+    console.log('✓ provider-templates.json copied successfully!');
+  } else {
+    console.warn('⚠ Warning: provider-templates.json not found in UI dist, skipping...');
+  }
+
   // Step 7: Copy CLI dist to project root
   console.log('\nCopying CLI dist to project root...');
   const rootDistDir = path.join(rootDir, 'dist');
