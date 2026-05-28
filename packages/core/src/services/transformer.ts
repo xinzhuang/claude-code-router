@@ -44,11 +44,13 @@ export class TransformerService {
 
   getTransformersWithEndpoint(): { name: string; transformer: Transformer }[] {
     const result: { name: string; transformer: Transformer }[] = [];
+    const seenEndpoints = new Set<string>();
 
     this.transformers.forEach((transformer, name) => {
-      // Check if it's an instance with endPoint
-      if (typeof transformer === 'object' && transformer.endPoint) {
-        result.push({ name, transformer });
+      const instance = this.resolveInstance(transformer);
+      if (instance?.endPoint && !seenEndpoints.has(instance.endPoint)) {
+        seenEndpoints.add(instance.endPoint);
+        result.push({ name, transformer: instance });
       }
     });
 
@@ -62,13 +64,21 @@ export class TransformerService {
     const result: { name: string; transformer: Transformer }[] = [];
 
     this.transformers.forEach((transformer, name) => {
-      // Check if it's an instance without endPoint
-      if (typeof transformer === 'object' && !transformer.endPoint) {
-        result.push({ name, transformer });
+      const instance = this.resolveInstance(transformer);
+      if (instance && !instance.endPoint) {
+        result.push({ name, transformer: instance });
       }
     });
 
     return result;
+  }
+
+  // Resolve a transformer entry to an instance — handles both class constructors and instances
+  private resolveInstance(transformer: Transformer | TransformerConstructor): Transformer | undefined {
+    if (typeof transformer === 'function') {
+      return new (transformer as any)();
+    }
+    return transformer as Transformer;
   }
 
   removeTransformer(name: string): boolean {

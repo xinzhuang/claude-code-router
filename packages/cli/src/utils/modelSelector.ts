@@ -76,6 +76,35 @@ const AVAILABLE_TRANSFORMERS = [
   'rovo-cli'
 ];
 
+interface ProviderTemplate {
+  name: string;
+  api_base_url: string;
+  api_key: string;
+  models: string[];
+  transformer?: TransformerConfig;
+}
+
+function loadProviderTemplates(): ProviderTemplate[] {
+  // Try multiple possible locations for the templates file
+  const possiblePaths = [
+    path.join(__dirname, 'provider-templates.json'),
+    path.join(__dirname, '..', 'provider-templates.json'),
+    path.join(__dirname, '..', '..', 'ui', 'public', 'provider-templates.json'),
+    path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude-code-router', 'provider-templates.json'),
+  ];
+
+  for (const templatePath of possiblePaths) {
+    try {
+      if (fs.existsSync(templatePath)) {
+        return JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
+      }
+    } catch {
+      // Continue to next path
+    }
+  }
+  return [];
+}
+
 function getConfigPath(): string {
   const configDir = path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude-code-router');
   const configPath = path.join(configDir, 'config.json');
@@ -189,17 +218,19 @@ async function selectModelType() {
       { name: 'Image Model', value: 'image' },
       { name: 'Fallback Models', value: 'fallback' },
       { name: `${BOLDGREEN}+ Add New Model${RESET}`, value: 'addModel' }
-    ]
+    ],
+    loop: false
   });
 }
 
 async function selectModel(config: Config, modelType: string) {
   const models = getAllModels(config);
-  
+
   return await select({
     message: `\n${BOLDYELLOW}Select a model for ${modelType}:${RESET}`,
     choices: models,
-    pageSize: 15
+    pageSize: 15,
+    loop: false
   });
 }
 
@@ -228,6 +259,7 @@ async function configureFallbackModels(config: Config): Promise<void> {
     message: `${BOLDYELLOW}Select scenario to configure fallback models:${RESET}`,
     choices: scenarioChoices,
     pageSize: 10,
+    loop: false
   }) as string;
 
   const currentList = fallback[scenario as keyof FallbackConfig] || [];
@@ -255,7 +287,8 @@ async function configureFallbackModels(config: Config): Promise<void> {
         { name: 'Remove fallback model', value: 'remove' },
         { name: 'Clear all fallback models', value: 'clear' },
       ] : []),
-    ]
+    ],
+    loop: false
   }) as string;
 
   if (action === 'add') {
@@ -264,6 +297,7 @@ async function configureFallbackModels(config: Config): Promise<void> {
       message: `\n${BOLDYELLOW}Select a fallback model to add:${RESET}`,
       choices: models,
       pageSize: 15,
+      loop: false
     }) as string;
 
     if (!currentList.includes(selected)) {
@@ -286,6 +320,7 @@ async function configureFallbackModels(config: Config): Promise<void> {
           value: m,
         };
       }),
+      loop: false
     }) as string;
 
     const idx = currentList.indexOf(selected);
@@ -336,7 +371,8 @@ async function configureTransformers(): Promise<TransformerConfig | undefined> {
     const transformer = await select({
       message: `\n${BOLDYELLOW}Select a transformer:${RESET}`,
       choices: AVAILABLE_TRANSFORMERS.map(t => ({ name: t, value: t })),
-      pageSize: 15
+      pageSize: 15,
+      loop: false
     }) as string;
     
     // Check if transformer needs options
@@ -391,7 +427,8 @@ async function addNewModel(config: Config): Promise<ModelResult | null> {
   
   const selectedProvider = await select({
     message: `\n${BOLDYELLOW}Select provider for the new model:${RESET}`,
-    choices: providerChoices
+    choices: providerChoices,
+    loop: false
   }) as string;
   
   if (selectedProvider === '__new__') {
@@ -458,9 +495,10 @@ async function addModelToExistingProvider(config: Config, providerName: string):
         { name: 'Long Context Model', value: 'longContext' },
         { name: 'Web Search Model', value: 'webSearch' },
         { name: 'Image Model', value: 'image' }
-      ]
+      ],
+      loop: false
     }) as string;
-    
+
     return { providerName, modelName, modelType };
   }
   
@@ -469,90 +507,165 @@ async function addModelToExistingProvider(config: Config, providerName: string):
 
 async function addNewProvider(config: Config): Promise<ModelResult | null> {
   console.log(`\n${BOLDCYAN}Adding New Provider${RESET}\n`);
-  
-  const providerName = await input({
-    message: `${BOLDYELLOW}Provider name:${RESET}`,
-    validate: (value: string) => {
-      if (!value.trim()) {
-        return 'Provider name cannot be empty';
-      }
-      if (config.Providers.some(p => p.name === value)) {
-        return 'Provider already exists';
-      }
-      return true;
+
+  // Check for available templates
+  const templates = loadProviderTemplates();
+  let selectedTemplate: ProviderTemplate | null = null;
+
+  if (templates.length > 0) {
+    const templateAction = await select({
+      message: `${BOLDYELLOW}Select from template or add manually?${RESET}`,
+      choices: [
+        { name: `${BOLDGREEN}Select from template${RESET}`, value: 'template' },
+        { name: 'Add manually', value: 'manual' },
+      ],
+      loop: false
+    }) as string;
+
+    if (templateAction === 'template') {
+      selectedTemplate = await select({
+        message: `${BOLDYELLOW}Select a provider template:${RESET}`,
+        choices: templates.map(t => ({
+          name: `${BOLDCYAN}${t.name}${RESET} ${DIM}(${t.api_base_url})${RESET}`,
+          value: t,
+          description: `Models: ${t.models.join(', ')}`
+        })),
+        loop: false
+      }) as ProviderTemplate;
     }
-  });
-  
-  const apiBaseUrl = await input({
-    message: `\n${BOLDYELLOW}API base URL:${RESET}`,
-    validate: (value: string) => {
-      if (!value.trim()) {
-        return 'API base URL cannot be empty';
-      }
-      try {
-        new URL(value);
+  }
+
+  let providerName: string;
+  let apiBaseUrl: string;
+  let apiKey: string;
+  let models: string[];
+
+  if (selectedTemplate) {
+    providerName = selectedTemplate.name;
+    apiBaseUrl = selectedTemplate.api_base_url;
+    models = [...selectedTemplate.models];
+
+    // API key is always required, even with templates
+    apiKey = await input({
+      message: `\n${BOLDYELLOW}API key for ${providerName}:${RESET}`,
+      validate: (value: string) => {
+        if (!value.trim()) {
+          return 'API key cannot be empty';
+        }
         return true;
-      } catch {
-        return 'Please enter a valid URL';
       }
+    });
+
+    // Allow user to modify model list
+    console.log(`\n${BOLDCYAN}Template models:${RESET} ${models.join(', ')}`);
+    const modifyModels = await confirm({
+      message: `${BOLDYELLOW}Modify model list?${RESET}`,
+      default: false
+    });
+
+    if (modifyModels) {
+      const modelsInput = await input({
+        message: `\n${BOLDYELLOW}Model names (comma-separated):${RESET}`,
+        default: models.join(', '),
+        validate: (value: string) => {
+          if (!value.trim()) {
+            return 'At least one model name is required';
+          }
+          return true;
+        }
+      });
+      models = modelsInput.split(',').map(m => m.trim()).filter(m => m);
     }
-  });
-  
-  const apiKey = await input({
-    message: `\n${BOLDYELLOW}API key:${RESET}`,
-    validate: (value: string) => {
-      if (!value.trim()) {
-        return 'API key cannot be empty';
+  } else {
+    providerName = await input({
+      message: `${BOLDYELLOW}Provider name:${RESET}`,
+      validate: (value: string) => {
+        if (!value.trim()) {
+          return 'Provider name cannot be empty';
+        }
+        if (config.Providers.some(p => p.name === value)) {
+          return 'Provider already exists';
+        }
+        return true;
       }
-      return true;
-    }
-  });
-  
-  const modelsInput = await input({
-    message: `\n${BOLDYELLOW}Model names (comma-separated):${RESET}`,
-    validate: (value: string) => {
-      if (!value.trim()) {
-        return 'At least one model name is required';
+    });
+
+    apiBaseUrl = await input({
+      message: `\n${BOLDYELLOW}API base URL:${RESET}`,
+      validate: (value: string) => {
+        if (!value.trim()) {
+          return 'API base URL cannot be empty';
+        }
+        try {
+          new URL(value);
+          return true;
+        } catch {
+          return 'Please enter a valid URL';
+        }
       }
-      return true;
-    }
-  });
-  
-  const models = modelsInput.split(',').map(m => m.trim()).filter(m => m);
-  
+    });
+
+    apiKey = await input({
+      message: `\n${BOLDYELLOW}API key:${RESET}`,
+      validate: (value: string) => {
+        if (!value.trim()) {
+          return 'API key cannot be empty';
+        }
+        return true;
+      }
+    });
+
+    const modelsInput = await input({
+      message: `\n${BOLDYELLOW}Model names (comma-separated):${RESET}`,
+      validate: (value: string) => {
+        if (!value.trim()) {
+          return 'At least one model name is required';
+        }
+        return true;
+      }
+    });
+
+    models = modelsInput.split(',').map(m => m.trim()).filter(m => m);
+  }
+
   const newProvider: Provider = {
     name: providerName,
     api_base_url: apiBaseUrl,
     api_key: apiKey,
     models: models
   };
-  
-  // Global transformer configuration
-  const transformerConfig = await configureTransformers();
-  if (transformerConfig) {
-    newProvider.transformer = transformerConfig;
+
+  // Use template transformer config if available, otherwise ask the user
+  if (selectedTemplate && selectedTemplate.transformer) {
+    newProvider.transformer = selectedTemplate.transformer;
+  } else {
+    const transformerConfig = await configureTransformers();
+    if (transformerConfig) {
+      newProvider.transformer = transformerConfig;
+    }
   }
-  
+
   config.Providers.push(newProvider);
   saveConfig(config);
-  
+
   console.log(`${GREEN}\n✓ Provider "${providerName}" added successfully${RESET}`);
-  
+
   const setAsDefault = await confirm({
     message: `\n${BOLDYELLOW}Do you want to set one of these models in router configuration?${RESET}`,
     default: false
   });
-  
+
   if (setAsDefault && models.length > 0) {
     let selectedModel = models[0];
-    
+
     if (models.length > 1) {
       selectedModel = await select({
         message: `\n${BOLDYELLOW}Select which model to configure:${RESET}`,
-        choices: models.map(m => ({ name: m, value: m }))
+        choices: models.map(m => ({ name: m, value: m })),
+        loop: false
       }) as string;
     }
-    
+
     const modelType = await select({
       message: `\n${BOLDYELLOW}Select configuration type:${RESET}`,
       choices: [
@@ -562,12 +675,13 @@ async function addNewProvider(config: Config): Promise<ModelResult | null> {
         { name: 'Long Context Model', value: 'longContext' },
         { name: 'Web Search Model', value: 'webSearch' },
         { name: 'Image Model', value: 'image' }
-      ]
+      ],
+      loop: false
     }) as string;
-    
+
     return { providerName, modelName: selectedModel, modelType };
   }
-  
+
   return null;
 }
 

@@ -78,13 +78,32 @@ export function Providers() {
   useEffect(() => {
     const fetchProviderTemplates = async () => {
       try {
-        const response = await fetch('https://pub-0dc3e1677e894f07bbea11b17a29e032.r2.dev/providers.json');
-        if (response.ok) {
-          const data = await response.json();
-          setProviderTemplates(data || []);
-        } else {
-          console.error('Failed to fetch provider templates');
+        const [remoteResponse, localResponse] = await Promise.allSettled([
+          fetch('https://pub-0dc3e1677e894f07bbea11b17a29e032.r2.dev/providers.json'),
+          fetch('./provider-templates.json')
+        ]);
+
+        let templates: ProviderType[] = [];
+
+        // Load remote templates first
+        if (remoteResponse.status === 'fulfilled' && remoteResponse.value.ok) {
+          const remoteData = await remoteResponse.value.json();
+          templates = remoteData || [];
         }
+
+        // Merge local templates (override remote with same name, append new)
+        if (localResponse.status === 'fulfilled' && localResponse.value.ok) {
+          const localData = await localResponse.value.json();
+          if (Array.isArray(localData)) {
+            const remoteByName = new Map(templates.map(t => [t.name, t]));
+            for (const local of localData) {
+              remoteByName.set(local.name, local);
+            }
+            templates = Array.from(remoteByName.values());
+          }
+        }
+
+        setProviderTemplates(templates);
       } catch (error) {
         console.error('Failed to fetch provider templates:', error);
       }

@@ -34,6 +34,10 @@ interface MessageCreateParamsBase {
 
 const enc = get_encoding("cl100k_base");
 
+// Strip extended-context bracket suffix from model names (e.g., "claude-sonnet-4-6[1m]" → "claude-sonnet-4-6")
+// [1m] indicates 1M token context window — a client-side indicator, not part of the provider model ID
+const stripModelSuffix = (model: string): string => model.replace(/\[.*?\]$/, "");
+
 export const calculateTokenCount = (
   messages: MessageParam[],
   system: any,
@@ -131,13 +135,16 @@ const getUseModel = async (
   const providers = configService.get<any[]>("providers") || [];
   const Router = projectSpecificRouter || configService.get("Router");
 
-  if (req.body.model.includes(",")) {
-    const [provider, model] = req.body.model.split(",");
+  // Strip extended-context bracket suffix (e.g., [1m]) before routing logic
+  const baseModel = stripModelSuffix(req.body.model);
+
+  if (baseModel.includes(",")) {
+    const [provider, model] = baseModel.split(",");
     const finalProvider = providers.find(
       (p: any) => p.name.toLowerCase() === provider
     );
     const finalModel = finalProvider?.models?.find(
-      (m: any) => m.toLowerCase() === model
+      (m: any) => m.toLowerCase() === model.toLowerCase()
     );
     if (finalProvider && finalModel) {
       return { model: `${finalProvider.name},${finalModel}`, scenarioType: 'default' };
@@ -176,8 +183,8 @@ const getUseModel = async (
   // Use the background model for any Claude Haiku variant
   const globalRouter = configService.get("Router");
   if (
-    req.body.model?.includes("claude") &&
-    req.body.model?.includes("haiku") &&
+    baseModel.includes("claude") &&
+    baseModel.includes("haiku") &&
     globalRouter?.background
   ) {
     req.log.info(`Using background model for ${req.body.model}`);
@@ -238,7 +245,8 @@ export const router = async (req: any, _res: any, context: RouterContext) => {
 
   try {
     // Try to get tokenizer config for the current model
-    const [providerName, modelName] = req.body.model.split(",");
+    const rawModel = stripModelSuffix(req.body.model);
+    const [providerName, modelName] = rawModel.split(",");
     const tokenizerConfig = context.tokenizerService?.getTokenizerConfigForModel(
       providerName,
       modelName
